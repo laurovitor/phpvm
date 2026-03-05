@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var appVersion = "0.1.0-alpha"
@@ -25,6 +26,8 @@ type releaseInfo struct {
 }
 
 type releaseIndex map[string]releaseInfo
+
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 func main() {
 	args := os.Args[1:]
@@ -67,7 +70,7 @@ func printHelp() {
 	fmt.Println("  phpvm list                   (alias: ls)")
 	fmt.Println("  phpvm current                (alias: c)")
 	fmt.Println("  phpvm available [major|x.y]  (alias: a)")
-	fmt.Println("  phpvm remove <version>       (alias: rm)")
+	fmt.Println("  phpvm remove <version> [--force] (alias: rm)")
 	fmt.Println("  phpvm version                (alias: v)")
 	fmt.Println("")
 	fmt.Println("Version inputs:")
@@ -207,20 +210,33 @@ func runInstall(args []string) error {
 		return err
 	}
 
+	tmp := filepath.Join(dst, "_extract")
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return err
+	}
 	switch kind {
 	case "zip":
-		if err := extractZip(archive, dst); err != nil {
+		if err := extractZip(archive, tmp); err != nil {
 			return err
 		}
 	case "tar.gz":
-		if err := extractTarGz(archive, dst); err != nil {
+		if err := extractTarGz(archive, tmp); err != nil {
 			return err
 		}
 	}
 
+	phpDir, err := findPHPDir(tmp)
+	if err != nil {
+		return fmt.Errorf("installed archive does not contain runnable PHP binary (downloaded source package?)")
+	}
+	if err := moveDirContents(phpDir, dst); err != nil {
+		return err
+	}
+	_ = os.RemoveAll(tmp)
+
 	bin := phpBinaryPath(dst)
 	if _, err := os.Stat(bin); err != nil {
-		return fmt.Errorf("installed archive does not contain runnable PHP binary at %s (OS package may differ)", bin)
+		return fmt.Errorf("installed archive does not contain runnable PHP binary at %s", bin)
 	}
 	fmt.Println("Installed", resolved)
 	return nil
@@ -249,10 +265,15 @@ func runUse(args []string) error {
 		return err
 	}
 
+	bin := phpBinaryPath(target)
+	if _, err := os.Stat(bin); err != nil {
+		return fmt.Errorf("switched but php binary not found at %s", bin)
+	}
+
 	fmt.Println("Switched to PHP", resolved)
 	fmt.Println("Ensure your PATH contains:")
 	if runtime.GOOS == "windows" {
-		fmt.Println("  %USERPROFILE%\\.phpvm\\current")
+		fmt.Println("  USERPROFILE\\.phpvm\\current")
 	} else {
 		fmt.Println("  ~/.phpvm/current/bin")
 	}
@@ -261,15 +282,21 @@ func runUse(args []string) error {
 
 func runRemove(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: phpvm remove <version>")
+		return errors.New("usage: phpvm remove <version> [--force]")
+	}
+	force := false
+	for _, a := range args[1:] {
+		if a == "--force" || a == "-f" {
+			force = true
+		}
 	}
 	resolved, err := resolveLocalVersion(args[0])
 	if err != nil {
 		return err
 	}
 	curr, _ := activeVersion()
-	if curr == resolved {
-		return errors.New("cannot remove active version; switch first")
+	if curr == resolved && !force {
+		return errors.New("cannot remove active version; switch first or use --force")
 	}
 	path := filepath.Join(versionsDir(), resolved)
 	if _, err := os.Stat(path); err != nil {
@@ -277,6 +304,9 @@ func runRemove(args []string) error {
 	}
 	if err := os.RemoveAll(path); err != nil {
 		return err
+	}
+	if curr == resolved {
+		_ = os.RemoveAll(currentLink())
 	}
 	fmt.Println("Removed", resolved)
 	return nil
@@ -330,7 +360,7 @@ func resolveLocalVersion(input string) (string, error) {
 }
 
 func fetchAvailable(filter string) ([]string, error) {
-	resp, err := http.Get("https://www.php.net/releases/?json")
+	resp, err := httpClient.Get("https://www.php.net/releases/?json")
 	if err != nil {
 		return nil, err
 	}
@@ -344,6 +374,9 @@ func fetchAvailable(filter string) ([]string, error) {
 	}
 	versions := make([]string, 0, len(idx))
 	for k := range idx {
+		if !isStableVersion(k) {
+			continue
+		}
 		if filter == "" || strings.HasPrefix(k, filter+".") || k == filter {
 			versions = append(versions, k)
 		}
@@ -394,7 +427,12 @@ func downloadPHPArchive(version, dst string) (path string, kind string, err erro
 }
 
 func downloadFile(url, out string) error {
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "phpvm/0.1")
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -491,9 +529,105 @@ func extractTarGz(src, dst string) error {
 	return nil
 }
 
+func isStableVersion(v string) bool {
+	return regexp.MustCompile(`^\d+\.\d+\.\d+$`).MatchString(v)
+}
+
+func findPHPDir(root string) (string, error) {
+	want := "php"
+	if runtime.GOOS == "windows" {
+		want = "php.exe"
+	}
+	var found string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Base(path) == want {
+			found = filepath.Dir(path)
+			return io.EOF
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	if found == "" {
+		return "", errors.New("php binary not found")
+	}
+	return found, nil
+}
+
+func moveDirContents(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		from := filepath.Join(src, e.Name())
+		to := filepath.Join(dst, e.Name())
+		if _, err := os.Stat(to); err == nil {
+			continue
+		}
+		if err := os.Rename(from, to); err != nil {
+			if e.IsDir() {
+				if err := copyDir(from, to); err != nil {
+					return err
+				}
+				_ = os.RemoveAll(from)
+			} else {
+				if err := copyFile(from, to); err != nil {
+					return err
+				}
+				_ = os.Remove(from)
+			}
+		}
+	}
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		return copyFile(path, target)
+	})
+}
+
 func phpBinaryPath(versionDir string) string {
 	if runtime.GOOS == "windows" {
 		return filepath.Join(versionDir, "php.exe")
 	}
-	return filepath.Join(versionDir, "bin", "php")
+	bin := filepath.Join(versionDir, "bin", "php")
+	if _, err := os.Stat(bin); err == nil {
+		return bin
+	}
+	return filepath.Join(versionDir, "php")
 }
