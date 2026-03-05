@@ -19,20 +19,24 @@ php -v
 
 ## Planned Commands
 
-- `phpvm install <version>`
-- `phpvm use <version>`
-- `phpvm list`
-- `phpvm current`
-- `phpvm available`
-- `phpvm remove <version>`
-- `phpvm version`
+- `phpvm install <version>` (alias: `i`)
+- `phpvm use <version>` (alias: `u`)
+- `phpvm list` (alias: `ls`)
+- `phpvm current` (alias: `c`)
+- `phpvm available` (alias: `a`)
+- `phpvm remove <version>` (alias: `rm`)
+- `phpvm version` (alias: `v`)
 
 ## First Milestone (v0.1)
 
 - Windows + Linux support
-- Install from official PHP binary sources
+- Install from official PHP upstream archives
 - `install/use/list/current/version/remove/available`
 - PATH/symlink based switching
+- Version selectors:
+  - `phpvm install 8` -> latest stable `8.x.y`
+  - `phpvm install 8.2` -> latest stable `8.2.x`
+  - `phpvm install 8.2.30` -> exact version
 
 macOS support lands in the next milestone.
 
@@ -46,7 +50,9 @@ This project starts in **Go** for:
 
 ## Status
 
-🚧 Initial scaffold in progress.
+🚧 Early alpha in progress.
+
+Current implementation supports command flow and version resolution. Archive layout still varies by platform/package, so install/use behavior will be hardened next.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
