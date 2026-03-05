@@ -56,6 +56,8 @@ func main() {
 		must(runUse(rest))
 	case "remove", "rm":
 		must(runRemove(rest))
+	case "doctor", "d":
+		must(runDoctor())
 	default:
 		must(fmt.Errorf("unknown command: %s", cmd))
 	}
@@ -72,6 +74,7 @@ func printHelp() {
 	fmt.Println("  phpvm available [major|x.y]  (alias: a)")
 	fmt.Println("  phpvm remove <version> [--force] (alias: rm)")
 	fmt.Println("  phpvm version                (alias: v)")
+	fmt.Println("  phpvm doctor                 (alias: d)")
 	fmt.Println("")
 	fmt.Println("Version inputs:")
 	fmt.Println("  - exact: 8.2.30")
@@ -277,6 +280,47 @@ func runUse(args []string) error {
 	} else {
 		fmt.Println("  ~/.phpvm/current/bin")
 	}
+	return nil
+}
+
+func runDoctor() error {
+	if err := ensureDirs(); err != nil {
+		return err
+	}
+	fmt.Println("phpvm doctor")
+	fmt.Println("-----------")
+	fmt.Println("Root:", rootDir())
+	fmt.Println("Versions:", versionsDir())
+
+	curr, _ := activeVersion()
+	if curr == "" {
+		fmt.Println("Active version: none")
+	} else {
+		fmt.Println("Active version:", curr)
+	}
+
+	path := os.Getenv("PATH")
+	if runtime.GOOS == "windows" {
+		want := filepath.Clean(currentLink())
+		ok := strings.Contains(strings.ToLower(path), strings.ToLower(want))
+		fmt.Println("PATH has phpvm current:", ok)
+		if !ok {
+			fmt.Println("Add this to PATH:")
+			fmt.Println(" ", want)
+			fmt.Println("PowerShell (current user):")
+			fmt.Println("  [Environment]::SetEnvironmentVariable(\"Path\", [Environment]::GetEnvironmentVariable(\"Path\",\"User\") + \";\" + \"$HOME\\.phpvm\\current\", \"User\")")
+		}
+	} else {
+		want := filepath.Join(currentLink(), "bin")
+		ok := strings.Contains(path, want)
+		fmt.Println("PATH has phpvm current/bin:", ok)
+		if !ok {
+			fmt.Println("Add one of the snippets below to your shell profile:")
+			fmt.Println(" bash/zsh: export PATH=\"$HOME/.phpvm/current/bin:$PATH\"")
+		}
+	}
+
+	fmt.Println("composer follows the active php as long as PATH points to phpvm current")
 	return nil
 }
 
