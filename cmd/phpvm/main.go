@@ -230,7 +230,7 @@ func runInstall(args []string) error {
 
 	phpDir, err := findPHPDir(tmp)
 	if err != nil {
-		return fmt.Errorf("installed archive does not contain runnable PHP binary (downloaded source package?)")
+		return fmt.Errorf("installed archive does not contain runnable PHP binary. On Linux, php.net tarballs are source builds; prebuilt Linux binaries are not wired yet")
 	}
 	if err := moveDirContents(phpDir, dst); err != nil {
 		return err
@@ -320,7 +320,7 @@ func runDoctor() error {
 		}
 	}
 
-	fmt.Println("composer follows the active php as long as PATH points to phpvm current")
+	fmt.Println("Composer note: composer follows the active php when `php` resolves to phpvm current first in PATH")
 	return nil
 }
 
@@ -452,15 +452,27 @@ func parseSemver(v string) [3]int {
 
 func downloadPHPArchive(version, dst string) (path string, kind string, err error) {
 	if runtime.GOOS == "windows" {
-		fname := fmt.Sprintf("php-%s-nts-Win32-vs17-x64.zip", version)
-		url := "https://windows.php.net/downloads/releases/" + fname
-		out := filepath.Join(dst, fname)
-		if err := downloadFile(url, out); err != nil {
-			return "", "", fmt.Errorf("windows package download failed (%s): %w", url, err)
+		candidates := []string{
+			fmt.Sprintf("php-%s-nts-Win32-vs17-x64.zip", version),
+			fmt.Sprintf("php-%s-Win32-vs17-x64.zip", version),
+			fmt.Sprintf("php-%s-nts-Win32-vs16-x64.zip", version),
+			fmt.Sprintf("php-%s-Win32-vs16-x64.zip", version),
 		}
-		return out, "zip", nil
+		var lastErr error
+		for _, fname := range candidates {
+			url := "https://windows.php.net/downloads/releases/" + fname
+			out := filepath.Join(dst, fname)
+			if err := downloadFile(url, out); err == nil {
+				return out, "zip", nil
+			} else {
+				lastErr = err
+			}
+		}
+		return "", "", fmt.Errorf("windows package download failed for all known variants (nts/ts, vs17/vs16): %w", lastErr)
 	}
 
+	// Linux note: php.net distributions are source tarballs. We keep this download path
+	// for now but return explicit guidance when binary layout is missing after extract.
 	fname := fmt.Sprintf("php-%s.tar.gz", version)
 	url := "https://www.php.net/distributions/" + fname
 	out := filepath.Join(dst, fname)

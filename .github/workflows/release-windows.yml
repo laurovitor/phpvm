@@ -1,0 +1,49 @@
+name: release-windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Build exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          go build -ldflags "-s -w" -o dist/phpvm.exe ./cmd/phpvm
+      - name: Package zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/phpvm.exe -DestinationPath dist/phpvm-windows-amd64.zip -Force
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phpvm-windows-amd64
+          path: dist/phpvm-windows-amd64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: phpvm-windows-amd64
+          path: dist
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/phpvm-windows-amd64.zip
+          draft: true
+          generate_release_notes: true
