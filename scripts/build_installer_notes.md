@@ -1,16 +1,16 @@
-# Building phpvm-setup.exe (Windows)
+# Building phpvm-setup.exe (NSIS)
 
-We use **Inno Setup** for a proper Windows wizard installer with uninstall support.
+We use **NSIS** so we can build a Windows wizard installer directly from Linux/macOS/Windows.
 
 ## Prerequisites
 
-- Install Inno Setup 6 on Windows
-- Ensure `dist/phpvm.exe` exists (from build)
+- NSIS installed (`makensis` in PATH)
+- `dist/phpvm.exe` exists (from build script)
 
-## Build command (PowerShell)
+## Build command
 
-```powershell
-iscc installer\windows\phpvm.iss
+```bash
+./scripts/build_windows_setup.sh v0.1.1-alpha.2
 ```
 
 Expected output:
@@ -20,6 +20,6 @@ Expected output:
 ## What installer does
 
 - Installs `phpvm.exe` to `%LocalAppData%\\phpvm\\bin`
-- Optional add-to-PATH task (current user)
+- Adds path for current user (idempotent)
 - Registers uninstall entry in Apps & Features
 - Removes PATH entry on uninstall

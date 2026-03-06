@@ -80,18 +80,20 @@ To create a draft GitHub release manually (using `gh`):
 
 A proper wizard installer script is included at:
 
-- `installer/windows/phpvm.iss`
+- `installer/windows/phpvm.nsi` (NSIS)
 
 It supports:
 
 - install/update in `%LocalAppData%\\phpvm`
-- optional PATH registration for current user
+- PATH registration for current user
 - uninstall entry in Apps & Features
 - PATH cleanup on uninstall
 
-Build instructions are documented in:
+Build installer locally:
 
-- `scripts/build_installer_notes.md`
+```bash
+./scripts/build_windows_setup.sh v0.1.1-alpha.2
+```
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

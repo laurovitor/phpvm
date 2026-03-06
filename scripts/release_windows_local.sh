@@ -12,9 +12,14 @@ NOTES="${2:-Manual local build release}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 ZIP="$DIST_DIR/phpvm-windows-amd64.zip"
+SETUP="$DIST_DIR/phpvm-setup.exe"
 
 if [[ ! -f "$ZIP" ]]; then
   echo "Missing $ZIP. Run scripts/build_release_local.sh $VERSION first."
+  exit 1
+fi
+if [[ ! -f "$SETUP" ]]; then
+  echo "Missing $SETUP. Run scripts/build_windows_setup.sh $VERSION first."
   exit 1
 fi
 
@@ -23,7 +28,7 @@ cd "$ROOT_DIR"
 git tag -f "$VERSION"
 git push -f origin "$VERSION"
 
-gh release create "$VERSION" "$ZIP" \
+gh release create "$VERSION" "$ZIP" "$SETUP" \
   --repo laurovitor/phpvm \
   --title "$VERSION" \
   --notes "$NOTES" \
