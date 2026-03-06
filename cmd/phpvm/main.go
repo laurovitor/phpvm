@@ -357,9 +357,19 @@ func runUse(args []string) error {
 	}
 
 	fmt.Println("Switched to PHP", resolved)
+	if runtime.GOOS == "windows" {
+		changed, err := ensureWindowsUserPathContainsCurrent()
+		if err != nil {
+			logf("failed to update user PATH automatically: %v", err)
+		}
+		if changed {
+			fmt.Printf("Updated user PATH with %%USERPROFILE%%\\.phpvm\\current\n")
+		}
+	}
 	fmt.Println("Ensure your PATH contains:")
 	if runtime.GOOS == "windows" {
-		fmt.Println("  USERPROFILE\\.phpvm\\current")
+		fmt.Printf("  %%USERPROFILE%%\\.phpvm\\current\n")
+		fmt.Println("Tip: open a new terminal, then run: where php && php -v")
 	} else {
 		fmt.Println("  ~/.phpvm/current/bin")
 	}
@@ -380,6 +390,41 @@ func setCurrentTarget(target string) error {
 		return fmt.Errorf("failed to activate version on windows (symlink denied and copy fallback failed): %w", err)
 	}
 	return nil
+}
+
+func ensureWindowsUserPathContainsCurrent() (bool, error) {
+	if runtime.GOOS != "windows" {
+		return false, nil
+	}
+	ps := `$target = [Environment]::ExpandEnvironmentVariables('%USERPROFILE%\\.phpvm\\current')
+$userPath = [Environment]::GetEnvironmentVariable('Path','User')
+$parts = @()
+if ($userPath) {
+  $parts = $userPath.Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+}
+$targetNorm = $target.TrimEnd('\\').ToLowerInvariant()
+$exists = $false
+foreach ($p in $parts) {
+  if ($p.TrimEnd('\\').ToLowerInvariant() -eq $targetNorm) {
+    $exists = $true
+    break
+  }
+}
+if (-not $exists) {
+  $newPath = (($parts + $target) -join ';')
+  [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+  Write-Output 'ADDED'
+} else {
+  Write-Output 'UNCHANGED'
+}`
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("powershell path update failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return strings.Contains(string(out), "ADDED"), nil
 }
 
 func runDoctor() error {
@@ -836,8 +881,15 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 		fmt.Printf("Downloading file (%s). This may take a while depending on your connection...\n", formatBytes(contentLen))
 		var read int64
 		buf := make([]byte, 32*1024)
-		barWidth := 24
+		barWidth := 18
 		start := time.Now()
+		lastPaint := time.Time{}
+		painted := false
+		defer func() {
+			if painted {
+				fmt.Println()
+			}
+		}()
 		for {
 			n, er := body.Read(buf)
 			if n > 0 {
@@ -845,17 +897,33 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 					return ew
 				}
 				read += int64(n)
-				pct := float64(read) / float64(contentLen)
-				if pct > 1 {
-					pct = 1
+				now := time.Now()
+				if !lastPaint.IsZero() && now.Sub(lastPaint) < 200*time.Millisecond && read < contentLen {
+					// keep output smooth without flooding console
+				} else {
+					pct := float64(read) / float64(contentLen)
+					if pct > 1 {
+						pct = 1
+					}
+					filled := int(pct * float64(barWidth))
+					if filled > barWidth {
+						filled = barWidth
+					}
+					bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+					elapsed := time.Since(start).Seconds()
+					if elapsed < 0.001 {
+						elapsed = 0.001
+					}
+					rate := float64(read) / elapsed
+					remain := contentLen - read
+					eta := "--"
+					if rate > 1 {
+						eta = formatETA(time.Duration(float64(remain)/rate) * time.Second)
+					}
+					fmt.Printf("\r[%s] %3d%% - %s/s - %s de %s - %s restante", bar, int(pct*100), formatBytes(int64(rate)), formatBytes(read), formatBytes(contentLen), eta)
+					lastPaint = now
+					painted = true
 				}
-				filled := int(pct * float64(barWidth))
-				if filled > barWidth {
-					filled = barWidth
-				}
-				bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
-				rate := float64(read) / time.Since(start).Seconds()
-				fmt.Printf("\r[%s] %3d%%  %s/s", bar, int(pct*100), formatBytes(int64(rate)))
 			}
 			if er == io.EOF {
 				break
@@ -864,7 +932,6 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 				return er
 			}
 		}
-		fmt.Println()
 		return nil
 	}
 
@@ -881,9 +948,31 @@ func formatBytes(n int64) string {
 		i++
 	}
 	if i == 0 {
-		return fmt.Sprintf("%d%s", int64(v), units[i])
+		return fmt.Sprintf("%d %s", int64(v), units[i])
 	}
-	return fmt.Sprintf("%.1f%s", v, units[i])
+	s := fmt.Sprintf("%.1f", v)
+	s = strings.Replace(s, ".", ",", 1)
+	return fmt.Sprintf("%s %s", s, units[i])
+}
+
+func formatETA(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalSec := int(d.Seconds())
+	if totalSec < 60 {
+		return fmt.Sprintf("%ds", totalSec)
+	}
+	min := totalSec / 60
+	if min < 60 {
+		return fmt.Sprintf("%d min", min)
+	}
+	h := min / 60
+	m := min % 60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh %dmin", h, m)
 }
 
 func isRetryableErr(err error) bool {
