@@ -4,12 +4,16 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -28,6 +32,11 @@ type releaseInfo struct {
 }
 
 type releaseIndex map[string]releaseInfo
+
+type windowsZipCandidate struct {
+	Path string
+	SHA  string
+}
 
 type ghRelease struct {
 	TagName string `json:"tag_name"`
@@ -665,7 +674,7 @@ func parseSemver(v string) [3]int {
 
 func downloadPHPArchive(version, dst string) (path string, kind string, err error) {
 	if runtime.GOOS == "windows" {
-		fname, err := resolveWindowsZipFromIndex(version)
+		cands, err := resolveWindowsZipCandidates(version)
 		if err != nil {
 			return "", "", err
 		}
@@ -675,22 +684,24 @@ func downloadPHPArchive(version, dst string) (path string, kind string, err erro
 		}
 		var lastErr error
 		lastURL := ""
-		for _, b := range bases {
-			url := b + fname
-			out := filepath.Join(dst, fname)
-			logf("trying windows package url: %s", url)
-			if err := downloadFile(url, out); err == nil {
-				return out, "zip", nil
-			} else {
-				lastErr = err
-				lastURL = url
-				logf("download failed for %s: %v", url, err)
+		for _, c := range cands {
+			for _, b := range bases {
+				url := b + c.Path
+				out := filepath.Join(dst, c.Path)
+				logf("trying windows package url: %s", url)
+				if err := downloadFileWithFallback(url, out, c.SHA); err == nil {
+					return out, "zip", nil
+				} else {
+					lastErr = err
+					lastURL = url
+					logf("download failed for %s: %v", url, err)
+				}
 			}
 		}
 		if lastErr == nil {
-			return "", "", fmt.Errorf("windows package download failed for %s (no URL succeeded)", fname)
+			return "", "", fmt.Errorf("windows package download failed for %s (no URL succeeded)", version)
 		}
-		return "", "", fmt.Errorf("windows package download failed for %s (last tried %s): %v", fname, lastURL, lastErr)
+		return "", "", fmt.Errorf("windows package download failed (last tried %s): %v", lastURL, lastErr)
 	}
 
 	fname := fmt.Sprintf("php-%s.tar.gz", version)
@@ -702,42 +713,70 @@ func downloadPHPArchive(version, dst string) (path string, kind string, err erro
 	return out, "tar.gz", nil
 }
 
-func resolveWindowsZipFromIndex(version string) (string, error) {
+func resolveWindowsZipCandidates(version string) ([]windowsZipCandidate, error) {
 	resp, err := httpClient.Get("https://windows.php.net/downloads/releases/releases.json")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("windows releases index returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("windows releases index returned %d", resp.StatusCode)
 	}
 	var idx map[string]map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&idx); err != nil {
-		return "", err
+		return nil, err
 	}
 	parts := strings.Split(version, ".")
 	if len(parts) < 2 {
-		return "", fmt.Errorf("invalid version %s", version)
+		return nil, fmt.Errorf("invalid version %s", version)
 	}
 	track := parts[0] + "." + parts[1]
 	entry, ok := idx[track]
 	if !ok {
-		return "", fmt.Errorf("no windows package track for %s", track)
+		return nil, fmt.Errorf("no windows package track for %s", track)
 	}
 	if v, ok := entry["version"].(string); ok && v != version {
 		logf("requested %s but windows index latest for %s is %s", version, track, v)
 	}
 	pref := []string{"nts-vs17-x64", "nts-vs16-x64", "ts-vs17-x64", "ts-vs16-x64"}
+	out := make([]windowsZipCandidate, 0, 4)
 	for _, k := range pref {
 		if raw, ok := entry[k].(map[string]any); ok {
 			if zipv, ok := raw["zip"].(map[string]any); ok {
-				if p, ok := zipv["path"].(string); ok && strings.TrimSpace(p) != "" {
-					return p, nil
+				p, _ := zipv["path"].(string)
+				h, _ := zipv["sha256"].(string)
+				if strings.TrimSpace(p) != "" {
+					out = append(out, windowsZipCandidate{Path: p, SHA: strings.TrimSpace(h)})
 				}
 			}
 		}
 	}
-	return "", fmt.Errorf("no supported x64 zip package found for %s", version)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no supported x64 zip package found for %s", version)
+	}
+	return out, nil
+}
+
+func downloadFileWithFallback(url, out, sha string) error {
+	err := downloadFile(url, out)
+	if err != nil && runtime.GOOS == "windows" {
+		logf("native fallback powershell download for %s", url)
+		if perr := powershellDownload(url, out); perr == nil {
+			err = nil
+		} else {
+			logf("powershell fallback failed: %v", perr)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(sha) != "" {
+		if err := verifySHA256(out, sha); err != nil {
+			_ = os.Remove(out)
+			return fmt.Errorf("checksum mismatch: %w", err)
+		}
+	}
+	return nil
 }
 
 func downloadFile(url, out string) error {
@@ -761,7 +800,6 @@ func downloadFile(url, out string) error {
 			}
 			return err
 		}
-
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
 			if resp.StatusCode >= 500 && attempt < maxAttempts {
@@ -770,7 +808,6 @@ func downloadFile(url, out string) error {
 			}
 			return fmt.Errorf("http %d", resp.StatusCode)
 		}
-
 		if err := streamToFile(resp.Body, out, resp.ContentLength); err != nil {
 			resp.Body.Close()
 			lastErr = err
@@ -794,10 +831,13 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 		return err
 	}
 	defer f.Close()
+
 	if contentLen > 0 {
+		fmt.Printf("Downloading file (%s). This may take a while depending on your connection...\n", formatBytes(contentLen))
 		var read int64
 		buf := make([]byte, 32*1024)
-		lastPct := int64(-1)
+		barWidth := 24
+		start := time.Now()
 		for {
 			n, er := body.Read(buf)
 			if n > 0 {
@@ -805,11 +845,17 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 					return ew
 				}
 				read += int64(n)
-				pct := (read * 100) / contentLen
-				if pct != lastPct && (pct%10 == 0 || pct == 100) {
-					fmt.Printf("Downloading... %d%%", pct)
-					lastPct = pct
+				pct := float64(read) / float64(contentLen)
+				if pct > 1 {
+					pct = 1
 				}
+				filled := int(pct * float64(barWidth))
+				if filled > barWidth {
+					filled = barWidth
+				}
+				bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+				rate := float64(read) / time.Since(start).Seconds()
+				fmt.Printf("\r[%s] %3d%%  %s/s", bar, int(pct*100), formatBytes(int64(rate)))
 			}
 			if er == io.EOF {
 				break
@@ -821,8 +867,23 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 		fmt.Println()
 		return nil
 	}
+
 	_, err = io.Copy(f, body)
 	return err
+}
+
+func formatBytes(n int64) string {
+	units := []string{"B", "KB", "MB", "GB"}
+	v := float64(n)
+	i := 0
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
+		i++
+	}
+	if i == 0 {
+		return fmt.Sprintf("%d%s", int64(v), units[i])
+	}
+	return fmt.Sprintf("%.1f%s", v, units[i])
 }
 
 func isRetryableErr(err error) bool {
@@ -834,6 +895,35 @@ func isRetryableErr(err error) bool {
 		return true
 	}
 	return false
+}
+
+func powershellDownload(url, out string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+	script := fmt.Sprintf("$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '%s' -OutFile '%s'", strings.ReplaceAll(url, "'", "''"), strings.ReplaceAll(out, "'", "''"))
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("powershell download failed: %v (%s)", err, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+func verifySHA256(path, expected string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	actual := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(strings.TrimSpace(expected), strings.TrimSpace(actual)) {
+		return fmt.Errorf("expected %s got %s", expected, actual)
+	}
+	return nil
 }
 
 func extractZip(src, dst string) error {
