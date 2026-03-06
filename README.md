@@ -54,6 +54,26 @@ This project starts in **Go** for:
 
 Current implementation supports command flow and version resolution. Archive layout still varies by platform/package, so install/use behavior will be hardened next.
 
+## Windows testing (no paid CI required)
+
+You can test in Windows right now without GitHub Actions:
+
+```bash
+# from repo root
+./scripts/build_release_local.sh v0.1.0-alpha.local
+```
+
+Artifacts will be generated in `dist/` including:
+
+- `phpvm.exe`
+- `phpvm-windows-amd64.zip`
+
+To create a draft GitHub release manually (using `gh`):
+
+```bash
+./scripts/release_windows_local.sh v0.1.0-alpha.1 "First Windows alpha draft"
+```
+
 See [docs/ROADMAP.md](docs/ROADMAP.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## License
