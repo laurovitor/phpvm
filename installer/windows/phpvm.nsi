@@ -27,6 +27,8 @@ RequestExecutionLevel user
 Unicode true
 Icon "..\\..\\assets\\icons\\icon_3.ico"
 UninstallIcon "..\\..\\assets\\icons\\icon_3.ico"
+!define MUI_ICON "..\\..\\assets\\icons\\icon_3.ico"
+!define MUI_UNICON "..\\..\\assets\\icons\\icon_3.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -50,12 +52,12 @@ Function .onInit
 FunctionEnd
 
 Section "Install"
-  SetOutPath "$INSTDIR\\bin"
+  SetOutPath "$INSTDIR\bin"
   File "${INPUT_EXE}"
 
   ; Add to user PATH (idempotent)
   ReadRegStr $0 HKCU "Environment" "Path"
-  StrCpy $1 "$INSTDIR\\bin"
+  StrCpy $1 "$INSTDIR\bin"
   StrLen $2 $0
   ${If} $2 == 0
     StrCpy $0 "$1"
@@ -77,11 +79,11 @@ Section "Install"
   WriteRegStr HKCU "${APP_UNINST_KEY}" "Publisher" "${APP_PUBLISHER}"
   WriteRegStr HKCU "${APP_UNINST_KEY}" "URLInfoAbout" "${APP_URL}"
   WriteRegStr HKCU "${APP_UNINST_KEY}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "${APP_UNINST_KEY}" "UninstallString" '"$INSTDIR\\Uninstall.exe"'
+  WriteRegStr HKCU "${APP_UNINST_KEY}" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegDWORD HKCU "${APP_UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${APP_UNINST_KEY}" "NoRepair" 1
 
-  WriteUninstaller "$INSTDIR\\Uninstall.exe"
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   DetailPrint "$(DESC_INSTALLED)"
   DetailPrint "$(DESC_RESTART)"
@@ -90,7 +92,7 @@ SectionEnd
 Section "Uninstall"
   ; Remove from user PATH
   ReadRegStr $0 HKCU "Environment" "Path"
-  StrCpy $1 "$INSTDIR\\bin"
+  StrCpy $1 "$INSTDIR\bin"
   Push $0
   Push ";$1"
   Call un.StrReplace
@@ -104,9 +106,9 @@ Section "Uninstall"
   ${EndIf}
   WriteRegExpandStr HKCU "Environment" "Path" "$0"
 
-  Delete "$INSTDIR\\bin\\phpvm.exe"
-  RMDir "$INSTDIR\\bin"
-  Delete "$INSTDIR\\Uninstall.exe"
+  Delete "$INSTDIR\bin\\phpvm.exe"
+  RMDir "$INSTDIR\bin"
+  Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
 
   DeleteRegKey HKCU "${APP_UNINST_KEY}"

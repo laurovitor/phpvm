@@ -449,8 +449,9 @@ func runUse(args []string) error {
 	}
 	fmt.Println("Ensure your PATH contains:")
 	if runtime.GOOS == "windows" {
+		fmt.Printf("  %%LOCALAPPDATA%%\\phpvm\\bin\n")
 		fmt.Printf("  %%USERPROFILE%%\\.phpvm\\current\n")
-		fmt.Println("Tip: open a new terminal, then run: where php && php -v")
+		fmt.Println("Tip: open a new terminal, then run: where phpvm && where php && php -v")
 	} else {
 		fmt.Println("  ~/.phpvm/current/bin")
 	}
@@ -528,14 +529,16 @@ func runDoctor() error {
 
 	path := os.Getenv("PATH")
 	if runtime.GOOS == "windows" {
-		want := filepath.Clean(currentLink())
-		ok := strings.Contains(strings.ToLower(path), strings.ToLower(want))
-		fmt.Println("PATH has phpvm current:", ok)
-		if !ok {
+		wantCurrent := filepath.Clean(currentLink())
+		wantBin := filepath.Clean(filepath.Join(os.Getenv("LOCALAPPDATA"), "phpvm", "bin"))
+		okCurrent := strings.Contains(strings.ToLower(path), strings.ToLower(wantCurrent))
+		okBin := strings.Contains(strings.ToLower(path), strings.ToLower(wantBin))
+		fmt.Println("PATH has phpvm bin:", okBin)
+		fmt.Println("PATH has phpvm current:", okCurrent)
+		if !okBin || !okCurrent {
 			fmt.Println("Add this to PATH:")
-			fmt.Println(" ", want)
-			fmt.Println("PowerShell (current user):")
-			fmt.Println("  [Environment]::SetEnvironmentVariable(\"Path\", [Environment]::GetEnvironmentVariable(\"Path\",\"User\") + \";\" + \"$HOME\\.phpvm\\current\", \"User\")")
+			fmt.Println(" ", wantBin)
+			fmt.Println(" ", wantCurrent)
 		}
 	} else {
 		want := filepath.Join(currentLink(), "bin")
@@ -590,8 +593,10 @@ func runSelfUpdate() error {
 	if current == "" {
 		current = "unknown"
 	}
-	if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(current), "v"), strings.TrimPrefix(strings.TrimSpace(rel.TagName), "v")) {
-		fmt.Println(tr("Already on latest release:", "Você já está na última release:", "Ya estás en la última release:"), rel.TagName)
+	currScore, currOK := releaseVersionScore(current)
+	latestScore, latestOK := releaseVersionScore(rel.TagName)
+	if currOK && latestOK && currScore >= latestScore {
+		fmt.Println(tr("Already on latest release:", "Você já está na última release:", "Ya estás en la última release:"), current)
 		return nil
 	}
 	fmt.Println(tr("Current version:", "Versão atual:", "Versión actual:"), current)
@@ -647,7 +652,7 @@ func runSelfUpdate() error {
 }
 
 func fetchLatestRelease() (*ghRelease, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=20", repoSlug)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=50", repoSlug)
 	logf("selfupdate checking releases: %s", url)
 	resp, err := httpClient.Get(url)
 	if err != nil {
@@ -661,13 +666,45 @@ func fetchLatestRelease() (*ghRelease, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
 		return nil, err
 	}
-	for _, r := range rels {
+	var best *ghRelease
+	bestScore := ""
+	for i := range rels {
+		r := &rels[i]
 		if r.Draft {
 			continue
 		}
-		return &r, nil
+		score, ok := releaseVersionScore(r.TagName)
+		if !ok {
+			continue
+		}
+		if best == nil || score > bestScore {
+			best = r
+			bestScore = score
+		}
 	}
-	return nil, errors.New("no published release found yet")
+	if best == nil {
+		return nil, errors.New("no published release found yet")
+	}
+	return best, nil
+}
+
+func releaseVersionScore(tag string) (string, bool) {
+	t := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(tag)), "v")
+	re := regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)(?:-([a-z]+)\.(\d+))?$`)
+	m := re.FindStringSubmatch(t)
+	if m == nil {
+		return "", false
+	}
+	major, _ := strconv.Atoi(m[1])
+	minor, _ := strconv.Atoi(m[2])
+	patch, _ := strconv.Atoi(m[3])
+	preKind := "zzzz"
+	preNum := 999999
+	if m[4] != "" {
+		preKind = m[4]
+		preNum, _ = strconv.Atoi(m[5])
+	}
+	return fmt.Sprintf("%06d%06d%06d-%s-%06d", major, minor, patch, preKind, preNum), true
 }
 
 func runRemove(args []string) error {
@@ -940,7 +977,7 @@ func resolveWindowsZipCandidates(version string) ([]windowsZipCandidate, error) 
 func runWithDots(label string, fn func() error) error {
 	done := make(chan error, 1)
 	go func() { done <- fn() }()
-	frames := []string{"■□□□□", "□■□□□", "□□■□□", "□□□■□", "□□□□■"}
+	frames := []string{"■■□□□", "□■■□□", "□□■■□", "□□□■■", "■□□□■"}
 	i := 0
 	for {
 		select {
