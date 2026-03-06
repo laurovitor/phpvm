@@ -38,6 +38,7 @@ type ghRelease struct {
 }
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
+var downloadClient = &http.Client{Timeout: 5 * time.Minute}
 var verbose bool
 
 func parseGlobalFlags(args []string) []string {
@@ -461,6 +462,7 @@ func runSelfUpdate() error {
 
 func fetchLatestRelease() (*ghRelease, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repoSlug)
+	logf("selfupdate checking latest release: %s", url)
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, err
@@ -739,38 +741,73 @@ func resolveWindowsZipFromIndex(version string) (string, error) {
 }
 
 func downloadFile(url, out string) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return err
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+		logf("download attempt %d/%d: %s", attempt, maxAttempts, url)
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", "phpvm/0.1")
+		resp, err := downloadClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if isRetryableErr(err) {
+				continue
+			}
+			return err
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			if resp.StatusCode >= 500 && attempt < maxAttempts {
+				lastErr = fmt.Errorf("http %d", resp.StatusCode)
+				continue
+			}
+			return fmt.Errorf("http %d", resp.StatusCode)
+		}
+
+		if err := streamToFile(resp.Body, out, resp.ContentLength); err != nil {
+			resp.Body.Close()
+			lastErr = err
+			if isRetryableErr(err) {
+				continue
+			}
+			return err
+		}
+		resp.Body.Close()
+		return nil
 	}
-	req.Header.Set("User-Agent", "phpvm/0.1")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
+	if lastErr != nil {
+		return lastErr
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http %d", resp.StatusCode)
-	}
+	return errors.New("download failed")
+}
+
+func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 	f, err := os.Create(out)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if cl := resp.ContentLength; cl > 0 {
+	if contentLen > 0 {
 		var read int64
 		buf := make([]byte, 32*1024)
 		lastPct := int64(-1)
 		for {
-			n, er := resp.Body.Read(buf)
+			n, er := body.Read(buf)
 			if n > 0 {
 				if _, ew := f.Write(buf[:n]); ew != nil {
 					return ew
 				}
 				read += int64(n)
-				pct := (read * 100) / cl
+				pct := (read * 100) / contentLen
 				if pct != lastPct && (pct%10 == 0 || pct == 100) {
-					fmt.Printf("\rDownloading... %d%%", pct)
+					fmt.Printf("Downloading... %d%%", pct)
 					lastPct = pct
 				}
 			}
@@ -784,8 +821,19 @@ func downloadFile(url, out string) error {
 		fmt.Println()
 		return nil
 	}
-	_, err = io.Copy(f, resp.Body)
+	_, err = io.Copy(f, body)
 	return err
+}
+
+func isRetryableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "tempor") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "context deadline") {
+		return true
+	}
+	return false
 }
 
 func extractZip(src, dst string) error {
