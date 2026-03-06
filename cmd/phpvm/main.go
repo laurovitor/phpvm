@@ -392,6 +392,9 @@ func fetchLatestRelease() (*ghRelease, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errors.New("no public release found yet (latest release endpoint returned 404)")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("github releases endpoint returned %d", resp.StatusCode)
 	}
