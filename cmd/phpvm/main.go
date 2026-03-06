@@ -49,7 +49,7 @@ type ghRelease struct {
 }
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
-var downloadClient = &http.Client{Timeout: 5 * time.Minute}
+var downloadClient = &http.Client{Timeout: 3 * time.Minute}
 var verbose bool
 var appLang string
 
@@ -995,6 +995,7 @@ func downloadFileWithFallback(url, out, sha string) error {
 	err := downloadFile(url, out)
 	if err != nil {
 		logf("native http downloader failed, trying curl fallback for %s", url)
+		fmt.Println(tr("Fallback: trying curl downloader...", "Fallback: tentando downloader curl...", "Fallback: intentando descargador curl..."))
 		if cerr := curlDownload(url, out); cerr == nil {
 			err = nil
 		} else {
@@ -1003,6 +1004,7 @@ func downloadFileWithFallback(url, out, sha string) error {
 	}
 	if err != nil && runtime.GOOS == "windows" {
 		logf("native fallback powershell download for %s", url)
+		fmt.Println(tr("Fallback: trying PowerShell downloader...", "Fallback: tentando downloader PowerShell...", "Fallback: intentando descargador PowerShell..."))
 		if perr := powershellDownload(url, out); perr == nil {
 			err = nil
 		} else {
@@ -1198,18 +1200,19 @@ func curlDownload(url, out string) error {
 	if _, err := exec.LookPath("curl"); err != nil {
 		return errors.New("curl not available")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "curl", "-fL", "--retry", "2", "--connect-timeout", "20", "--max-time", "720", "-o", out, url)
-	b, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("curl download failed: %v (%s)", err, strings.TrimSpace(string(b)))
+	cmd := exec.CommandContext(ctx, "curl", "-fL", "--retry", "1", "--retry-delay", "2", "--connect-timeout", "15", "--max-time", "420", "--speed-limit", "1024", "--speed-time", "60", "--progress-bar", "-o", out, url)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("curl download failed: %v", err)
 	}
 	return nil
 }
 
 func powershellDownload(url, out string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
 	script := fmt.Sprintf("$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri '%s' -OutFile '%s'", strings.ReplaceAll(url, "'", "''"), strings.ReplaceAll(out, "'", "''"))
 	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
