@@ -54,7 +54,7 @@ func main() {
 		printHelp()
 	case "version", "v", "--version", "-v":
 		fmt.Println("phpvm", appVersion)
-	case "list", "ls":
+	case "list", "ls", "l":
 		must(runList())
 	case "current", "c":
 		must(runCurrent())
@@ -110,8 +110,9 @@ func rootDir() string {
 	return filepath.Join(home, ".phpvm")
 }
 
-func versionsDir() string { return filepath.Join(rootDir(), "versions") }
-func currentLink() string { return filepath.Join(rootDir(), "current") }
+func versionsDir() string        { return filepath.Join(rootDir(), "versions") }
+func currentLink() string        { return filepath.Join(rootDir(), "current") }
+func currentVersionFile() string { return filepath.Join(rootDir(), "current.version") }
 
 func ensureDirs() error {
 	if err := os.MkdirAll(versionsDir(), 0o755); err != nil {
@@ -131,9 +132,14 @@ func runList() error {
 	curr, _ := activeVersion()
 	versions := make([]string, 0)
 	for _, e := range entries {
-		if e.IsDir() {
-			versions = append(versions, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		v := e.Name()
+		if _, err := os.Stat(phpBinaryPath(filepath.Join(versionsDir(), v))); err != nil {
+			continue
+		}
+		versions = append(versions, v)
 	}
 	sort.Slice(versions, func(i, j int) bool { return semverLess(versions[j], versions[i]) })
 	if len(versions) == 0 {
@@ -164,6 +170,12 @@ func runCurrent() error {
 }
 
 func activeVersion() (string, error) {
+	if b, err := os.ReadFile(currentVersionFile()); err == nil {
+		v := strings.TrimSpace(string(b))
+		if v != "" {
+			return v, nil
+		}
+	}
 	target, err := os.Readlink(currentLink())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -216,45 +228,70 @@ func runInstall(args []string) error {
 	}
 	dst := filepath.Join(versionsDir(), resolved)
 	if _, err := os.Stat(dst); err == nil {
-		fmt.Println("Already installed:", resolved)
-		return nil
-	}
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return err
+		if _, err2 := os.Stat(phpBinaryPath(dst)); err2 == nil {
+			fmt.Println("Already installed:", resolved)
+			return nil
+		}
+		_ = os.RemoveAll(dst)
 	}
 
-	archive, kind, err := downloadPHPArchive(resolved, dst)
+	tmpRoot := filepath.Join(rootDir(), "tmp")
+	if err := os.MkdirAll(tmpRoot, 0o755); err != nil {
+		return err
+	}
+	stage := filepath.Join(tmpRoot, "install-"+resolved+"-"+fmt.Sprint(time.Now().UnixNano()))
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+
+	archive, kind, err := downloadPHPArchive(resolved, stage)
 	if err != nil {
 		return err
 	}
 
-	tmp := filepath.Join(dst, "_extract")
-	if err := os.MkdirAll(tmp, 0o755); err != nil {
+	extractDir := filepath.Join(stage, "_extract")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return err
 	}
 	switch kind {
 	case "zip":
-		if err := extractZip(archive, tmp); err != nil {
+		if err := extractZip(archive, extractDir); err != nil {
 			return err
 		}
 	case "tar.gz":
-		if err := extractTarGz(archive, tmp); err != nil {
+		if err := extractTarGz(archive, extractDir); err != nil {
 			return err
 		}
 	}
 
-	phpDir, err := findPHPDir(tmp)
+	phpDir, err := findPHPDir(extractDir)
 	if err != nil {
 		return fmt.Errorf("installed archive does not contain runnable PHP binary. On Linux, php.net tarballs are source builds; prebuilt Linux binaries are not wired yet")
 	}
-	if err := moveDirContents(phpDir, dst); err != nil {
+	finalTmp := filepath.Join(stage, "final")
+	if err := os.MkdirAll(finalTmp, 0o755); err != nil {
 		return err
 	}
-	_ = os.RemoveAll(tmp)
+	if err := moveDirContents(phpDir, finalTmp); err != nil {
+		return err
+	}
+	if _, err := os.Stat(phpBinaryPath(finalTmp)); err != nil {
+		return fmt.Errorf("installed archive does not contain runnable PHP binary at %s", phpBinaryPath(finalTmp))
+	}
 
-	bin := phpBinaryPath(dst)
-	if _, err := os.Stat(bin); err != nil {
-		return fmt.Errorf("installed archive does not contain runnable PHP binary at %s", bin)
+	if err := os.RemoveAll(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(finalTmp, dst); err != nil {
+		if err := copyDir(finalTmp, dst); err != nil {
+			return err
+		}
+	}
+
+	if _, err := os.Stat(phpBinaryPath(dst)); err != nil {
+		_ = os.RemoveAll(dst)
+		return fmt.Errorf("install aborted: target does not contain php binary")
 	}
 	fmt.Println("Installed", resolved)
 	return nil
@@ -273,15 +310,10 @@ func runUse(args []string) error {
 		return fmt.Errorf("version not installed: %s", resolved)
 	}
 
-	if err := os.RemoveAll(currentLink()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := setCurrentTarget(target); err != nil {
 		return err
 	}
-	if err := os.Symlink(target, currentLink()); err != nil {
-		if runtime.GOOS == "windows" {
-			return fmt.Errorf("failed to create link on windows (run terminal as admin or enable developer mode): %w", err)
-		}
-		return err
-	}
+	_ = os.WriteFile(currentVersionFile(), []byte(resolved+"\n"), 0o644)
 
 	bin := phpBinaryPath(target)
 	if _, err := os.Stat(bin); err != nil {
@@ -294,6 +326,22 @@ func runUse(args []string) error {
 		fmt.Println("  USERPROFILE\\.phpvm\\current")
 	} else {
 		fmt.Println("  ~/.phpvm/current/bin")
+	}
+	return nil
+}
+
+func setCurrentTarget(target string) error {
+	if err := os.RemoveAll(currentLink()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Symlink(target, currentLink()); err == nil {
+		return nil
+	} else if runtime.GOOS != "windows" {
+		return err
+	}
+	// Windows fallback without symlink privilege: copy target to current
+	if err := copyDir(target, currentLink()); err != nil {
+		return fmt.Errorf("failed to activate version on windows (symlink denied and copy fallback failed): %w", err)
 	}
 	return nil
 }
@@ -432,6 +480,7 @@ func runRemove(args []string) error {
 	}
 	if curr == resolved {
 		_ = os.RemoveAll(currentLink())
+		_ = os.Remove(currentVersionFile())
 	}
 	fmt.Println("Removed", resolved)
 	return nil
