@@ -467,7 +467,7 @@ func fetchLatestRelease() (*ghRelease, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, errors.New("no public release found yet (latest release endpoint returned 404)")
+		return nil, errors.New("no published release found yet (draft releases are not visible to selfupdate)")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("github releases endpoint returned %d", resp.StatusCode)
@@ -672,15 +672,23 @@ func downloadPHPArchive(version, dst string) (path string, kind string, err erro
 			"https://windows.php.net/downloads/releases/archives/",
 		}
 		var lastErr error
+		lastURL := ""
 		for _, b := range bases {
 			url := b + fname
 			out := filepath.Join(dst, fname)
+			logf("trying windows package url: %s", url)
 			if err := downloadFile(url, out); err == nil {
 				return out, "zip", nil
+			} else {
+				lastErr = err
+				lastURL = url
+				logf("download failed for %s: %v", url, err)
 			}
-			lastErr = err
 		}
-		return "", "", fmt.Errorf("windows package download failed for %s: %w", fname, lastErr)
+		if lastErr == nil {
+			return "", "", fmt.Errorf("windows package download failed for %s (no URL succeeded)", fname)
+		}
+		return "", "", fmt.Errorf("windows package download failed for %s (last tried %s): %v", fname, lastURL, lastErr)
 	}
 
 	fname := fmt.Sprintf("php-%s.tar.gz", version)
