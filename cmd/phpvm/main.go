@@ -39,8 +39,10 @@ type windowsZipCandidate struct {
 }
 
 type ghRelease struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
+	TagName    string `json:"tag_name"`
+	Draft      bool   `json:"draft"`
+	Prerelease bool   `json:"prerelease"`
+	Assets     []struct {
 		Name string `json:"name"`
 		URL  string `json:"browser_download_url"`
 	} `json:"assets"`
@@ -175,9 +177,9 @@ func main() {
 }
 
 func printHelp() {
-	fmt.Println("phpvm - cross-platform PHP version manager (Windows/Linux first)")
+	fmt.Println(tr("phpvm - cross-platform PHP version manager (Windows/Linux first)", "phpvm - gerenciador de versões PHP multiplataforma (Windows/Linux primeiro)", "phpvm - gestor de versiones PHP multiplataforma (Windows/Linux primero)"))
 	fmt.Println("")
-	fmt.Println("Usage:")
+	fmt.Println(tr("Usage:", "Uso:", "Uso:"))
 	fmt.Println("  phpvm install <version>      (alias: i)")
 	fmt.Println("  phpvm use <version>          (alias: u)")
 	fmt.Println("  phpvm list                   (alias: ls)")
@@ -188,9 +190,9 @@ func printHelp() {
 	fmt.Println("  phpvm doctor                 (alias: d)")
 	fmt.Println("  phpvm selfupdate             (alias: su)")
 	fmt.Println("  phpvm lang list|get|set <lang>")
-	fmt.Println("Global flags: --verbose | -V | --log (can be placed anywhere)")
+	fmt.Println(tr("Global flags: --verbose | -V | --log (can be placed anywhere)", "Flags globais: --verbose | -V | --log (podem ser usadas em qualquer posição)", "Banderas globales: --verbose | -V | --log (pueden usarse en cualquier posición)"))
 	fmt.Println("")
-	fmt.Println("Version inputs:")
+	fmt.Println(tr("Version inputs:", "Entradas de versão:", "Entradas de versión:"))
 	fmt.Println("  - exact: 8.2.30")
 	fmt.Println("  - major: 8      -> latest stable 8.x")
 	fmt.Println("  - major.minor: 8.2 -> latest stable 8.2.x")
@@ -370,10 +372,16 @@ func runInstall(args []string) error {
 		return err
 	}
 
-	fmt.Println(tr("[4/5] Validating PHP binary...", "[4/5] Validando binário do PHP...", "[4/5] Validando binario de PHP..."))
-	phpDir, err := findPHPDir(extractDir)
-	if err != nil {
-		return fmt.Errorf("installed archive does not contain runnable PHP binary. On Linux, php.net tarballs are source builds; prebuilt Linux binaries are not wired yet")
+	var phpDir string
+	if err := runWithDots(tr("[4/5] Validating PHP binary", "[4/5] Validando binário do PHP", "[4/5] Validando binario de PHP"), func() error {
+		var ferr error
+		phpDir, ferr = findPHPDir(extractDir)
+		if ferr != nil {
+			return fmt.Errorf("installed archive does not contain runnable PHP binary. On Linux, php.net tarballs are source builds; prebuilt Linux binaries are not wired yet")
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	finalTmp := filepath.Join(stage, "final")
 	if err := os.MkdirAll(finalTmp, 0o755); err != nil {
@@ -399,7 +407,9 @@ func runInstall(args []string) error {
 		_ = os.RemoveAll(dst)
 		return fmt.Errorf("install aborted: target does not contain php binary")
 	}
-	fmt.Println(tr("[5/5] Finalizing install...", "[5/5] Finalizando instalação...", "[5/5] Finalizando instalación..."))
+	if err := runWithDots(tr("[5/5] Finalizing install", "[5/5] Finalizando instalação", "[5/5] Finalizando instalación"), func() error { return nil }); err != nil {
+		return err
+	}
 	fmt.Println(tr("Installed", "Instalado", "Instalado"), resolved)
 	return nil
 }
@@ -467,29 +477,30 @@ func ensureWindowsUserPathContainsCurrent() (bool, error) {
 	if runtime.GOOS != "windows" {
 		return false, nil
 	}
-	ps := `$target = [Environment]::ExpandEnvironmentVariables('%USERPROFILE%\\.phpvm\\current')
+	ps := `$currentTarget = [Environment]::ExpandEnvironmentVariables('%USERPROFILE%\\.phpvm\\current')
+$phpvmBin = [Environment]::ExpandEnvironmentVariables('%LOCALAPPDATA%\\phpvm\\bin')
 $userPath = [Environment]::GetEnvironmentVariable('Path','User')
-if ([string]::IsNullOrWhiteSpace($userPath)) {
-  Write-Output 'SKIP_EMPTY'
-  exit 0
+$parts = @()
+if (-not [string]::IsNullOrWhiteSpace($userPath)) {
+  $parts = $userPath.Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 }
-$parts = $userPath.Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-$targetNorm = $target.TrimEnd('\\').ToLowerInvariant()
-$exists = $false
-foreach ($p in $parts) {
-  if ($p.TrimEnd('\\').ToLowerInvariant() -eq $targetNorm) {
-    $exists = $true
-    break
+function HasPath([string[]]$arr, [string]$p) {
+  $n = $p.TrimEnd('\\').ToLowerInvariant()
+  foreach ($x in $arr) {
+    if ($x.TrimEnd('\\').ToLowerInvariant() -eq $n) { return $true }
   }
+  return $false
 }
-if (-not $exists) {
-  $newPath = (($parts + $target) -join ';')
-  [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+$changed = $false
+if (-not (HasPath $parts $phpvmBin)) { $parts += $phpvmBin; $changed = $true }
+if (-not (HasPath $parts $currentTarget)) { $parts += $currentTarget; $changed = $true }
+if ($changed) {
+  [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')
   Write-Output 'ADDED'
 } else {
   Write-Output 'UNCHANGED'
 }`
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps)
 	out, err := cmd.CombinedOutput()
@@ -579,7 +590,7 @@ func runSelfUpdate() error {
 	if current == "" {
 		current = "unknown"
 	}
-	if strings.EqualFold(strings.TrimSpace(current), strings.TrimSpace(rel.TagName)) {
+	if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(current), "v"), strings.TrimPrefix(strings.TrimSpace(rel.TagName), "v")) {
 		fmt.Println(tr("Already on latest release:", "Você já está na última release:", "Ya estás en la última release:"), rel.TagName)
 		return nil
 	}
@@ -636,24 +647,27 @@ func runSelfUpdate() error {
 }
 
 func fetchLatestRelease() (*ghRelease, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repoSlug)
-	logf("selfupdate checking latest release: %s", url)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=20", repoSlug)
+	logf("selfupdate checking releases: %s", url)
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, errors.New("no published release found yet (draft releases are not visible to selfupdate)")
-	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("github releases endpoint returned %d", resp.StatusCode)
 	}
-	var rel ghRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	var rels []ghRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rels); err != nil {
 		return nil, err
 	}
-	return &rel, nil
+	for _, r := range rels {
+		if r.Draft {
+			continue
+		}
+		return &r, nil
+	}
+	return nil, errors.New("no published release found yet")
 }
 
 func runRemove(args []string) error {
@@ -926,24 +940,30 @@ func resolveWindowsZipCandidates(version string) ([]windowsZipCandidate, error) 
 func runWithDots(label string, fn func() error) error {
 	done := make(chan error, 1)
 	go func() { done <- fn() }()
-	dots := 1
+	frames := []string{"■□□□□", "□■□□□", "□□■□□", "□□□■□", "□□□□■"}
+	i := 0
 	for {
 		select {
 		case err := <-done:
-			fmt.Printf("\r%s...\n", label)
+			fmt.Printf("\r%s ■■■■■\n", label)
 			return err
-		case <-time.After(350 * time.Millisecond):
-			fmt.Printf("\r%s%s", label, strings.Repeat(".", dots))
-			dots++
-			if dots > 3 {
-				dots = 1
-			}
+		case <-time.After(250 * time.Millisecond):
+			fmt.Printf("\r%s %s", label, frames[i])
+			i = (i + 1) % len(frames)
 		}
 	}
 }
 
 func downloadFileWithFallback(url, out, sha string) error {
 	err := downloadFile(url, out)
+	if err != nil {
+		logf("native http downloader failed, trying curl fallback for %s", url)
+		if cerr := curlDownload(url, out); cerr == nil {
+			err = nil
+		} else {
+			logf("curl fallback failed: %v", cerr)
+		}
+	}
 	if err != nil && runtime.GOOS == "windows" {
 		logf("native fallback powershell download for %s", url)
 		if perr := powershellDownload(url, out); perr == nil {
@@ -1054,7 +1074,7 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 					if filled > barWidth {
 						filled = barWidth
 					}
-					bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+					bar := strings.Repeat("■", filled) + strings.Repeat("□", barWidth-filled)
 					elapsed := time.Since(start).Seconds()
 					if elapsed < 0.001 {
 						elapsed = 0.001
@@ -1065,7 +1085,7 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 					if rate > 1 {
 						eta = formatETA(time.Duration(float64(remain)/rate) * time.Second)
 					}
-					line := fmt.Sprintf("[%s] %3d%% - %s/s - %s %s %s - %s %s", bar, int(pct*100), formatBytes(int64(rate)), formatBytes(read), tr("of", "de", "de"), formatBytes(contentLen), eta, tr("remaining", "restante", "restante"))
+					line := fmt.Sprintf("%s %3d%% - %s/s - %s %s %s - %s %s", bar, int(pct*100), formatBytes(int64(rate)), formatBytes(read), tr("of", "de", "de"), formatBytes(contentLen), eta, tr("remaining", "restante", "restante"))
 					pad := ""
 					if len(line) < lastLineLen {
 						pad = strings.Repeat(" ", lastLineLen-len(line))
@@ -1135,6 +1155,20 @@ func isRetryableErr(err error) bool {
 		return true
 	}
 	return false
+}
+
+func curlDownload(url, out string) error {
+	if _, err := exec.LookPath("curl"); err != nil {
+		return errors.New("curl not available")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "curl", "-fL", "--retry", "2", "--connect-timeout", "20", "--max-time", "720", "-o", out, url)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("curl download failed: %v (%s)", err, strings.TrimSpace(string(b)))
+	}
+	return nil
 }
 
 func powershellDownload(url, out string) error {
