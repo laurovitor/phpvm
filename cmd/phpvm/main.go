@@ -625,15 +625,23 @@ func runSelfUpdate() error {
 		return fmt.Errorf("no compatible asset found in latest release %s", rel.TagName)
 	}
 	if runtime.GOOS == "windows" {
-		tmp := filepath.Join(os.TempDir(), "phpvm-update.zip")
-		if strings.HasSuffix(url, ".exe") {
-			tmp = filepath.Join(os.TempDir(), "phpvm-new.exe")
-		}
-		if err := downloadFile(url, tmp); err != nil {
+		tmpZip := filepath.Join(os.TempDir(), "phpvm-update.zip")
+		if err := downloadFile(url, tmpZip); err != nil {
 			return err
 		}
-		fmt.Println(tr("Downloaded update to:", "Atualização baixada em:", "Actualización descargada en:"), tmp)
-		fmt.Println(tr("On Windows, replace phpvm.exe manually (cannot overwrite running executable).", "No Windows, substitua o phpvm.exe manualmente (não dá para sobrescrever em execução).", "En Windows, reemplaza phpvm.exe manualmente (no se puede sobrescribir en ejecución)."))
+		newExe := filepath.Join(os.TempDir(), "phpvm-new.exe")
+		if err := extractFileFromZip(tmpZip, "phpvm.exe", newExe); err != nil {
+			return fmt.Errorf("failed to extract phpvm.exe from update zip: %w", err)
+		}
+		target, err := os.Executable()
+		if err != nil || strings.TrimSpace(target) == "" {
+			target = filepath.Join(os.Getenv("LOCALAPPDATA"), "phpvm", "bin", "phpvm.exe")
+		}
+		if err := scheduleWindowsSelfReplace(target, newExe); err != nil {
+			return err
+		}
+		fmt.Println(tr("Update scheduled.", "Atualização agendada.", "Actualización programada."))
+		fmt.Println(tr("Close this terminal and open a new one in a few seconds, then run: phpvm v", "Feche este terminal e abra outro em alguns segundos, depois rode: phpvm v", "Cierra esta terminal y abre otra en unos segundos, luego ejecuta: phpvm v"))
 		return nil
 	}
 	target, _ := os.Executable()
@@ -1236,6 +1244,68 @@ func verifySHA256(path, expected string) error {
 	actual := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(strings.TrimSpace(expected), strings.TrimSpace(actual)) {
 		return fmt.Errorf("expected %s got %s", expected, actual)
+	}
+	return nil
+}
+
+func extractFileFromZip(zipPath, wantedName, outPath string) error {
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	for _, f := range r.File {
+		if !strings.EqualFold(filepath.Base(f.Name), wantedName) {
+			continue
+		}
+		in, err := f.Open()
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+			return err
+		}
+		out, err := os.Create(outPath)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+		out.Close()
+		return nil
+	}
+	return fmt.Errorf("file %s not found in zip", wantedName)
+}
+
+func scheduleWindowsSelfReplace(targetExe, newExe string) error {
+	targetExe = filepath.Clean(targetExe)
+	newExe = filepath.Clean(newExe)
+	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("phpvm-selfupdate-%d.cmd", time.Now().UnixNano()))
+	bak := targetExe + ".bak"
+	script := fmt.Sprintf(`@echo off
+setlocal
+set TARGET=%s
+set NEW=%s
+set BAK=%s
+for /L %%%%i in (1,1,20) do (
+  ping -n 2 127.0.0.1 >nul
+  copy /Y "%%TARGET%%" "%%BAK%%" >nul 2>&1
+  copy /Y "%%NEW%%" "%%TARGET%%" >nul 2>&1 && goto done
+)
+:done
+del /Q "%%NEW%%" >nul 2>&1
+del /Q "%s" >nul 2>&1
+endlocal
+`, targetExe, newExe, bak, scriptPath)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		return err
+	}
+	cmd := exec.Command("cmd", "/C", "start", "", "/MIN", scriptPath)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to launch windows updater helper: %w", err)
 	}
 	return nil
 }
