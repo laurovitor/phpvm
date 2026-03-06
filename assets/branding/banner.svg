@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="phpvm banner">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E3A8A"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="320" fill="url(#bg)"/>
+  <text x="80" y="165" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="84" font-weight="700" fill="#FFFFFF">phpvm</text>
+  <text x="82" y="215" font-family="Segoe UI, Inter, Arial, sans-serif" font-size="30" font-weight="400" fill="#BFDBFE">Cross-platform PHP version manager (Windows • Linux • macOS)</text>
+</svg>

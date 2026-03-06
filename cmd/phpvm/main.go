@@ -38,9 +38,29 @@ type ghRelease struct {
 }
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
+var verbose bool
+
+func parseGlobalFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		switch a {
+		case "--verbose", "-V", "--log":
+			verbose = true
+		default:
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func logf(format string, a ...any) {
+	if verbose {
+		fmt.Printf("[verbose] "+format+"\n", a...)
+	}
+}
 
 func main() {
-	args := os.Args[1:]
+	args := parseGlobalFlags(os.Args[1:])
 	if len(args) == 0 {
 		printHelp()
 		return
@@ -88,6 +108,7 @@ func printHelp() {
 	fmt.Println("  phpvm version                (alias: v)")
 	fmt.Println("  phpvm doctor                 (alias: d)")
 	fmt.Println("  phpvm selfupdate             (alias: su)")
+	fmt.Println("Global flags: --verbose | -V | --log (can be placed anywhere)")
 	fmt.Println("")
 	fmt.Println("Version inputs:")
 	fmt.Println("  - exact: 8.2.30")
@@ -222,6 +243,7 @@ func runInstall(args []string) error {
 		return err
 	}
 
+	fmt.Println("[1/5] Resolving version...")
 	resolved, err := resolveVersion(args[0])
 	if err != nil {
 		return err
@@ -245,6 +267,7 @@ func runInstall(args []string) error {
 	}
 	defer os.RemoveAll(stage)
 
+	fmt.Println("[2/5] Downloading package...")
 	archive, kind, err := downloadPHPArchive(resolved, stage)
 	if err != nil {
 		return err
@@ -254,6 +277,7 @@ func runInstall(args []string) error {
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return err
 	}
+	fmt.Println("[3/5] Extracting package...")
 	switch kind {
 	case "zip":
 		if err := extractZip(archive, extractDir); err != nil {
@@ -265,6 +289,7 @@ func runInstall(args []string) error {
 		}
 	}
 
+	fmt.Println("[4/5] Validating PHP binary...")
 	phpDir, err := findPHPDir(extractDir)
 	if err != nil {
 		return fmt.Errorf("installed archive does not contain runnable PHP binary. On Linux, php.net tarballs are source builds; prebuilt Linux binaries are not wired yet")
@@ -293,6 +318,7 @@ func runInstall(args []string) error {
 		_ = os.RemoveAll(dst)
 		return fmt.Errorf("install aborted: target does not contain php binary")
 	}
+	fmt.Println("[5/5] Finalizing install...")
 	fmt.Println("Installed", resolved)
 	return nil
 }
@@ -637,29 +663,24 @@ func parseSemver(v string) [3]int {
 
 func downloadPHPArchive(version, dst string) (path string, kind string, err error) {
 	if runtime.GOOS == "windows" {
+		fname, err := resolveWindowsZipFromIndex(version)
+		if err != nil {
+			return "", "", err
+		}
 		bases := []string{
 			"https://windows.php.net/downloads/releases/",
 			"https://windows.php.net/downloads/releases/archives/",
 		}
-		candidates := []string{
-			fmt.Sprintf("php-%s-nts-Win32-vs17-x64.zip", version),
-			fmt.Sprintf("php-%s-Win32-vs17-x64.zip", version),
-			fmt.Sprintf("php-%s-nts-Win32-vs16-x64.zip", version),
-			fmt.Sprintf("php-%s-Win32-vs16-x64.zip", version),
-		}
 		var lastErr error
 		for _, b := range bases {
-			for _, fname := range candidates {
-				url := b + fname
-				out := filepath.Join(dst, fname)
-				if err := downloadFile(url, out); err == nil {
-					return out, "zip", nil
-				} else {
-					lastErr = err
-				}
+			url := b + fname
+			out := filepath.Join(dst, fname)
+			if err := downloadFile(url, out); err == nil {
+				return out, "zip", nil
 			}
+			lastErr = err
 		}
-		return "", "", fmt.Errorf("windows package download failed for all known variants (nts/ts, vs17/vs16): %w", lastErr)
+		return "", "", fmt.Errorf("windows package download failed for %s: %w", fname, lastErr)
 	}
 
 	fname := fmt.Sprintf("php-%s.tar.gz", version)
@@ -669,6 +690,44 @@ func downloadPHPArchive(version, dst string) (path string, kind string, err erro
 		return "", "", fmt.Errorf("linux package download failed (%s): %w", url, err)
 	}
 	return out, "tar.gz", nil
+}
+
+func resolveWindowsZipFromIndex(version string) (string, error) {
+	resp, err := httpClient.Get("https://windows.php.net/downloads/releases/releases.json")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("windows releases index returned %d", resp.StatusCode)
+	}
+	var idx map[string]map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&idx); err != nil {
+		return "", err
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return "", fmt.Errorf("invalid version %s", version)
+	}
+	track := parts[0] + "." + parts[1]
+	entry, ok := idx[track]
+	if !ok {
+		return "", fmt.Errorf("no windows package track for %s", track)
+	}
+	if v, ok := entry["version"].(string); ok && v != version {
+		logf("requested %s but windows index latest for %s is %s", version, track, v)
+	}
+	pref := []string{"nts-vs17-x64", "nts-vs16-x64", "ts-vs17-x64", "ts-vs16-x64"}
+	for _, k := range pref {
+		if raw, ok := entry[k].(map[string]any); ok {
+			if zipv, ok := raw["zip"].(map[string]any); ok {
+				if p, ok := zipv["path"].(string); ok && strings.TrimSpace(p) != "" {
+					return p, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("no supported x64 zip package found for %s", version)
 }
 
 func downloadFile(url, out string) error {
@@ -690,6 +749,33 @@ func downloadFile(url, out string) error {
 		return err
 	}
 	defer f.Close()
+	if cl := resp.ContentLength; cl > 0 {
+		var read int64
+		buf := make([]byte, 32*1024)
+		lastPct := int64(-1)
+		for {
+			n, er := resp.Body.Read(buf)
+			if n > 0 {
+				if _, ew := f.Write(buf[:n]); ew != nil {
+					return ew
+				}
+				read += int64(n)
+				pct := (read * 100) / cl
+				if pct != lastPct && (pct%10 == 0 || pct == 100) {
+					fmt.Printf("\rDownloading... %d%%", pct)
+					lastPct = pct
+				}
+			}
+			if er == io.EOF {
+				break
+			}
+			if er != nil {
+				return er
+			}
+		}
+		fmt.Println()
+		return nil
+	}
 	_, err = io.Copy(f, resp.Body)
 	return err
 }

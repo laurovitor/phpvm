@@ -21,9 +21,11 @@
 
 Name "${APP_NAME} ${APP_VERSION}"
 OutFile "${OUT_DIR}\\phpvm-setup.exe"
-InstallDir "$LOCALAPPDATA\\phpvm"
+InstallDir "$LOCALAPPDATA\phpvm"
 RequestExecutionLevel user
 Unicode true
+Icon "..\\..\\assets\\icons\\icon_3.ico"
+UninstallIcon "..\\..\\assets\\icons\\icon_3.ico"
 
 Page directory
 Page instfiles

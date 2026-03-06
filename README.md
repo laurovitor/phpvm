@@ -1,5 +1,7 @@
 # phpvm
 
+![phpvm banner](assets/branding/banner.svg)
+
 `phpvm` is a cross-platform PHP version manager inspired by `nvm`.
 
 Goal: make PHP version switching as easy as:
