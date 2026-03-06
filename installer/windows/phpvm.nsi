@@ -13,6 +13,7 @@
 !endif
 
 !include "LogicLib.nsh"
+!include "MUI2.nsh"
 
 !define APP_NAME "phpvm"
 !define APP_PUBLISHER "Lauro Vitor"
@@ -27,10 +28,26 @@ Unicode true
 Icon "..\\..\\assets\\icons\\icon_3.ico"
 UninstallIcon "..\\..\\assets\\icons\\icon_3.ico"
 
-Page directory
-Page instfiles
-UninstPage uninstConfirm
-UninstPage instfiles
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+
+!insertmacro MUI_LANGUAGE "English"
+!insertmacro MUI_LANGUAGE "PortugueseBR"
+!insertmacro MUI_LANGUAGE "Spanish"
+
+LangString DESC_INSTALLED ${LANG_ENGLISH} "Installed to $INSTDIR"
+LangString DESC_INSTALLED ${LANG_PORTUGUESEBR} "Instalado em $INSTDIR"
+LangString DESC_INSTALLED ${LANG_SPANISH} "Instalado en $INSTDIR"
+LangString DESC_RESTART ${LANG_ENGLISH} "Restart terminal to use phpvm command."
+LangString DESC_RESTART ${LANG_PORTUGUESEBR} "Reinicie o terminal para usar o comando phpvm."
+LangString DESC_RESTART ${LANG_SPANISH} "Reinicia la terminal para usar el comando phpvm."
+
+Function .onInit
+  !insertmacro MUI_LANGDLL_DISPLAY
+FunctionEnd
 
 Section "Install"
   SetOutPath "$INSTDIR\\bin"
@@ -66,8 +83,8 @@ Section "Install"
 
   WriteUninstaller "$INSTDIR\\Uninstall.exe"
 
-  DetailPrint "Installed to $INSTDIR"
-  DetailPrint "Restart terminal to use phpvm command."
+  DetailPrint "$(DESC_INSTALLED)"
+  DetailPrint "$(DESC_RESTART)"
 SectionEnd
 
 Section "Uninstall"

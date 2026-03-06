@@ -49,6 +49,7 @@ type ghRelease struct {
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 var downloadClient = &http.Client{Timeout: 5 * time.Minute}
 var verbose bool
+var appLang string
 
 func parseGlobalFlags(args []string) []string {
 	out := make([]string, 0, len(args))
@@ -69,7 +70,73 @@ func logf(format string, a ...any) {
 	}
 }
 
+func langFile() string { return filepath.Join(rootDir(), "lang") }
+
+func normalizeLang(v string) string {
+	s := strings.ToLower(strings.TrimSpace(v))
+	s = strings.ReplaceAll(s, "_", "-")
+	s = strings.ReplaceAll(s, ".utf-8", "")
+	s = strings.ReplaceAll(s, ".utf8", "")
+	s = strings.TrimSpace(s)
+	switch {
+	case s == "pt" || strings.HasPrefix(s, "pt-br"):
+		return "pt-BR"
+	case s == "es" || strings.HasPrefix(s, "es-"):
+		return "es"
+	default:
+		return "en"
+	}
+}
+
+func detectOSLang() string {
+	for _, k := range []string{"PHPVM_LANG", "LC_ALL", "LC_MESSAGES", "LANG"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return normalizeLang(v)
+		}
+	}
+	return "en"
+}
+
+func loadLang() string {
+	if appLang != "" {
+		return appLang
+	}
+	if b, err := os.ReadFile(langFile()); err == nil {
+		appLang = normalizeLang(string(b))
+		return appLang
+	}
+	appLang = detectOSLang()
+	return appLang
+}
+
+func setLang(v string) error {
+	n := normalizeLang(v)
+	if err := os.MkdirAll(rootDir(), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(langFile(), []byte(n+"\n"), 0o644); err != nil {
+		return err
+	}
+	appLang = n
+	return nil
+}
+
+func tr(en, pt, es string) string {
+	switch loadLang() {
+	case "pt-BR":
+		if pt != "" {
+			return pt
+		}
+	case "es":
+		if es != "" {
+			return es
+		}
+	}
+	return en
+}
+
 func main() {
+	_ = loadLang()
 	args := parseGlobalFlags(os.Args[1:])
 	if len(args) == 0 {
 		printHelp()
@@ -100,6 +167,8 @@ func main() {
 		must(runDoctor())
 	case "selfupdate", "su":
 		must(runSelfUpdate())
+	case "lang", "language":
+		must(runLang(rest))
 	default:
 		must(fmt.Errorf("unknown command: %s", cmd))
 	}
@@ -118,6 +187,7 @@ func printHelp() {
 	fmt.Println("  phpvm version                (alias: v)")
 	fmt.Println("  phpvm doctor                 (alias: d)")
 	fmt.Println("  phpvm selfupdate             (alias: su)")
+	fmt.Println("  phpvm lang list|get|set <lang>")
 	fmt.Println("Global flags: --verbose | -V | --log (can be placed anywhere)")
 	fmt.Println("")
 	fmt.Println("Version inputs:")
@@ -253,7 +323,7 @@ func runInstall(args []string) error {
 		return err
 	}
 
-	fmt.Println("[1/5] Resolving version...")
+	fmt.Println(tr("[1/5] Resolving version...", "[1/5] Resolvendo versão...", "[1/5] Resolviendo versión..."))
 	resolved, err := resolveVersion(args[0])
 	if err != nil {
 		return err
@@ -277,7 +347,7 @@ func runInstall(args []string) error {
 	}
 	defer os.RemoveAll(stage)
 
-	fmt.Println("[2/5] Downloading package...")
+	fmt.Println(tr("[2/5] Downloading package...", "[2/5] Baixando pacote...", "[2/5] Descargando paquete..."))
 	archive, kind, err := downloadPHPArchive(resolved, stage)
 	if err != nil {
 		return err
@@ -287,19 +357,20 @@ func runInstall(args []string) error {
 	if err := os.MkdirAll(extractDir, 0o755); err != nil {
 		return err
 	}
-	fmt.Println("[3/5] Extracting package...")
-	switch kind {
-	case "zip":
-		if err := extractZip(archive, extractDir); err != nil {
-			return err
+	if err := runWithDots(tr("[3/5] Extracting package", "[3/5] Extraindo pacote", "[3/5] Extrayendo paquete"), func() error {
+		switch kind {
+		case "zip":
+			return extractZip(archive, extractDir)
+		case "tar.gz":
+			return extractTarGz(archive, extractDir)
+		default:
+			return nil
 		}
-	case "tar.gz":
-		if err := extractTarGz(archive, extractDir); err != nil {
-			return err
-		}
+	}); err != nil {
+		return err
 	}
 
-	fmt.Println("[4/5] Validating PHP binary...")
+	fmt.Println(tr("[4/5] Validating PHP binary...", "[4/5] Validando binário do PHP...", "[4/5] Validando binario de PHP..."))
 	phpDir, err := findPHPDir(extractDir)
 	if err != nil {
 		return fmt.Errorf("installed archive does not contain runnable PHP binary. On Linux, php.net tarballs are source builds; prebuilt Linux binaries are not wired yet")
@@ -328,8 +399,8 @@ func runInstall(args []string) error {
 		_ = os.RemoveAll(dst)
 		return fmt.Errorf("install aborted: target does not contain php binary")
 	}
-	fmt.Println("[5/5] Finalizing install...")
-	fmt.Println("Installed", resolved)
+	fmt.Println(tr("[5/5] Finalizing install...", "[5/5] Finalizando instalação...", "[5/5] Finalizando instalación..."))
+	fmt.Println(tr("Installed", "Instalado", "Instalado"), resolved)
 	return nil
 }
 
@@ -398,10 +469,11 @@ func ensureWindowsUserPathContainsCurrent() (bool, error) {
 	}
 	ps := `$target = [Environment]::ExpandEnvironmentVariables('%USERPROFILE%\\.phpvm\\current')
 $userPath = [Environment]::GetEnvironmentVariable('Path','User')
-$parts = @()
-if ($userPath) {
-  $parts = $userPath.Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+if ([string]::IsNullOrWhiteSpace($userPath)) {
+  Write-Output 'SKIP_EMPTY'
+  exit 0
 }
+$parts = $userPath.Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
 $targetNorm = $target.TrimEnd('\\').ToLowerInvariant()
 $exists = $false
 foreach ($p in $parts) {
@@ -468,11 +540,60 @@ func runDoctor() error {
 	return nil
 }
 
+func runLang(args []string) error {
+	if len(args) == 0 || args[0] == "get" || args[0] == "current" {
+		fmt.Println(loadLang())
+		return nil
+	}
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "list", "ls":
+		fmt.Println("pt-BR")
+		fmt.Println("es")
+		fmt.Println("en")
+		return nil
+	case "set":
+		if len(args) < 2 {
+			return errors.New("usage: phpvm lang set <pt-BR|es|en>")
+		}
+		if err := setLang(args[1]); err != nil {
+			return err
+		}
+		fmt.Println("language set to", loadLang())
+		return nil
+	default:
+		if err := setLang(sub); err == nil {
+			fmt.Println("language set to", loadLang())
+			return nil
+		}
+		return errors.New("usage: phpvm lang list|get|set <pt-BR|es|en>")
+	}
+}
+
 func runSelfUpdate() error {
 	rel, err := fetchLatestRelease()
 	if err != nil {
 		return err
 	}
+	current := appVersion
+	if current == "" {
+		current = "unknown"
+	}
+	if strings.EqualFold(strings.TrimSpace(current), strings.TrimSpace(rel.TagName)) {
+		fmt.Println(tr("Already on latest release:", "Você já está na última release:", "Ya estás en la última release:"), rel.TagName)
+		return nil
+	}
+	fmt.Println(tr("Current version:", "Versão atual:", "Versión actual:"), current)
+	fmt.Println(tr("Latest release:", "Última release:", "Última release:"), rel.TagName)
+	fmt.Print(tr("Update now? [y/N]: ", "Atualizar agora? [s/N]: ", "¿Actualizar ahora? [s/N]: "))
+	var answer string
+	_, _ = fmt.Scanln(&answer)
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	if answer == "" || (answer != "y" && answer != "yes" && answer != "s" && answer != "sim" && answer != "si") {
+		fmt.Println(tr("Update canceled.", "Atualização cancelada.", "Actualización cancelada."))
+		return nil
+	}
+
 	asset := "phpvm-windows-amd64.zip"
 	if runtime.GOOS != "windows" {
 		asset = "phpvm-linux-arm64"
@@ -495,8 +616,8 @@ func runSelfUpdate() error {
 		if err := downloadFile(url, tmp); err != nil {
 			return err
 		}
-		fmt.Println("Downloaded update to:", tmp)
-		fmt.Println("On Windows, replace phpvm.exe manually (cannot overwrite running executable).")
+		fmt.Println(tr("Downloaded update to:", "Atualização baixada em:", "Actualización descargada en:"), tmp)
+		fmt.Println(tr("On Windows, replace phpvm.exe manually (cannot overwrite running executable).", "No Windows, substitua o phpvm.exe manualmente (não dá para sobrescrever em execução).", "En Windows, reemplaza phpvm.exe manualmente (no se puede sobrescribir en ejecución)."))
 		return nil
 	}
 	target, _ := os.Executable()
@@ -510,7 +631,7 @@ func runSelfUpdate() error {
 	if err := os.Rename(tmp, target); err != nil {
 		return err
 	}
-	fmt.Println("Updated to", rel.TagName)
+	fmt.Println(tr("Updated to", "Atualizado para", "Actualizado a"), rel.TagName)
 	return nil
 }
 
@@ -802,6 +923,25 @@ func resolveWindowsZipCandidates(version string) ([]windowsZipCandidate, error) 
 	return out, nil
 }
 
+func runWithDots(label string, fn func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	dots := 1
+	for {
+		select {
+		case err := <-done:
+			fmt.Printf("\r%s...\n", label)
+			return err
+		case <-time.After(350 * time.Millisecond):
+			fmt.Printf("\r%s%s", label, strings.Repeat(".", dots))
+			dots++
+			if dots > 3 {
+				dots = 1
+			}
+		}
+	}
+}
+
 func downloadFileWithFallback(url, out, sha string) error {
 	err := downloadFile(url, out)
 	if err != nil && runtime.GOOS == "windows" {
@@ -878,16 +1018,21 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 	defer f.Close()
 
 	if contentLen > 0 {
-		fmt.Printf("Downloading file (%s). This may take a while depending on your connection...\n", formatBytes(contentLen))
+		fmt.Printf("%s\n", tr(
+			fmt.Sprintf("Downloading file (%s). This may take a while depending on your connection...", formatBytes(contentLen)),
+			fmt.Sprintf("Baixando arquivo (%s). Isso pode demorar dependendo da sua conexão...", formatBytes(contentLen)),
+			fmt.Sprintf("Descargando archivo (%s). Esto puede tardar según tu conexión...", formatBytes(contentLen)),
+		))
 		var read int64
 		buf := make([]byte, 32*1024)
 		barWidth := 18
 		start := time.Now()
 		lastPaint := time.Time{}
 		painted := false
+		lastLineLen := 0
 		defer func() {
 			if painted {
-				fmt.Println()
+				fmt.Print("\n")
 			}
 		}()
 		for {
@@ -909,7 +1054,7 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 					if filled > barWidth {
 						filled = barWidth
 					}
-					bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+					bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 					elapsed := time.Since(start).Seconds()
 					if elapsed < 0.001 {
 						elapsed = 0.001
@@ -920,7 +1065,13 @@ func streamToFile(body io.ReadCloser, out string, contentLen int64) error {
 					if rate > 1 {
 						eta = formatETA(time.Duration(float64(remain)/rate) * time.Second)
 					}
-					fmt.Printf("\r[%s] %3d%% - %s/s - %s de %s - %s restante", bar, int(pct*100), formatBytes(int64(rate)), formatBytes(read), formatBytes(contentLen), eta)
+					line := fmt.Sprintf("[%s] %3d%% - %s/s - %s %s %s - %s %s", bar, int(pct*100), formatBytes(int64(rate)), formatBytes(read), tr("of", "de", "de"), formatBytes(contentLen), eta, tr("remaining", "restante", "restante"))
+					pad := ""
+					if len(line) < lastLineLen {
+						pad = strings.Repeat(" ", lastLineLen-len(line))
+					}
+					fmt.Printf("\r%s%s", line, pad)
+					lastLineLen = len(line)
 					lastPaint = now
 					painted = true
 				}
