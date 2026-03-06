@@ -26,6 +26,7 @@ php -v
 - `phpvm available` (alias: `a`)
 - `phpvm remove <version>` (alias: `rm`)
 - `phpvm version` (alias: `v`)
+- `phpvm selfupdate` (alias: `su`)
 
 ## First Milestone (v0.1)
 
@@ -66,6 +67,7 @@ You can test in Windows right now without GitHub Actions:
 Artifacts will be generated in `dist/` including:
 
 - `phpvm.exe`
+- `phpvm-setup.exe`
 - `phpvm-windows-amd64.zip`
 
 To create a draft GitHub release manually (using `gh`):

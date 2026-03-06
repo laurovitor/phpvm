@@ -19,13 +19,23 @@ import (
 	"time"
 )
 
-var appVersion = "0.1.0-alpha"
+var appVersion = "0.1.1-alpha"
+
+const repoSlug = "laurovitor/phpvm"
 
 type releaseInfo struct {
 	Version string `json:"version"`
 }
 
 type releaseIndex map[string]releaseInfo
+
+type ghRelease struct {
+	TagName string `json:"tag_name"`
+	Assets  []struct {
+		Name string `json:"name"`
+		URL  string `json:"browser_download_url"`
+	} `json:"assets"`
+}
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
@@ -58,6 +68,8 @@ func main() {
 		must(runRemove(rest))
 	case "doctor", "d":
 		must(runDoctor())
+	case "selfupdate", "su":
+		must(runSelfUpdate())
 	default:
 		must(fmt.Errorf("unknown command: %s", cmd))
 	}
@@ -75,6 +87,7 @@ func printHelp() {
 	fmt.Println("  phpvm remove <version> [--force] (alias: rm)")
 	fmt.Println("  phpvm version                (alias: v)")
 	fmt.Println("  phpvm doctor                 (alias: d)")
+	fmt.Println("  phpvm selfupdate             (alias: su)")
 	fmt.Println("")
 	fmt.Println("Version inputs:")
 	fmt.Println("  - exact: 8.2.30")
@@ -101,7 +114,10 @@ func versionsDir() string { return filepath.Join(rootDir(), "versions") }
 func currentLink() string { return filepath.Join(rootDir(), "current") }
 
 func ensureDirs() error {
-	return os.MkdirAll(versionsDir(), 0o755)
+	if err := os.MkdirAll(versionsDir(), 0o755); err != nil {
+		return err
+	}
+	return os.MkdirAll(filepath.Join(rootDir(), "bin"), 0o755)
 }
 
 func runList() error {
@@ -153,7 +169,6 @@ func activeVersion() (string, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", nil
 		}
-		// Windows junction fallback
 		if runtime.GOOS == "windows" {
 			if st, statErr := os.Stat(currentLink()); statErr == nil && st.IsDir() {
 				return filepath.Base(currentLinkResolved()), nil
@@ -324,6 +339,69 @@ func runDoctor() error {
 	return nil
 }
 
+func runSelfUpdate() error {
+	rel, err := fetchLatestRelease()
+	if err != nil {
+		return err
+	}
+	asset := "phpvm-windows-amd64.zip"
+	if runtime.GOOS != "windows" {
+		asset = "phpvm-linux-arm64"
+	}
+	var url string
+	for _, a := range rel.Assets {
+		if a.Name == asset || (runtime.GOOS == "windows" && a.Name == "phpvm.exe") {
+			url = a.URL
+			break
+		}
+	}
+	if url == "" {
+		return fmt.Errorf("no compatible asset found in latest release %s", rel.TagName)
+	}
+	if runtime.GOOS == "windows" {
+		tmp := filepath.Join(os.TempDir(), "phpvm-update.zip")
+		if strings.HasSuffix(url, ".exe") {
+			tmp = filepath.Join(os.TempDir(), "phpvm-new.exe")
+		}
+		if err := downloadFile(url, tmp); err != nil {
+			return err
+		}
+		fmt.Println("Downloaded update to:", tmp)
+		fmt.Println("On Windows, replace phpvm.exe manually (cannot overwrite running executable).")
+		return nil
+	}
+	target, _ := os.Executable()
+	tmp := target + ".new"
+	if err := downloadFile(url, tmp); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return err
+	}
+	fmt.Println("Updated to", rel.TagName)
+	return nil
+}
+
+func fetchLatestRelease() (*ghRelease, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repoSlug)
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github releases endpoint returned %d", resp.StatusCode)
+	}
+	var rel ghRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return nil, err
+	}
+	return &rel, nil
+}
+
 func runRemove(args []string) error {
 	if len(args) < 1 {
 		return errors.New("usage: phpvm remove <version> [--force]")
@@ -404,6 +482,20 @@ func resolveLocalVersion(input string) (string, error) {
 }
 
 func fetchAvailable(filter string) ([]string, error) {
+	filter = strings.TrimSpace(filter)
+	if filter != "" {
+		if regexp.MustCompile(`^\d+$`).MatchString(filter) || regexp.MustCompile(`^\d+\.\d+$`).MatchString(filter) {
+			v, err := fetchLatestForTrack(filter)
+			if err != nil {
+				return nil, err
+			}
+			if v == "" {
+				return []string{}, nil
+			}
+			return []string{v}, nil
+		}
+	}
+
 	resp, err := httpClient.Get("https://www.php.net/releases/?json")
 	if err != nil {
 		return nil, err
@@ -417,16 +509,57 @@ func fetchAvailable(filter string) ([]string, error) {
 		return nil, err
 	}
 	versions := make([]string, 0, len(idx))
-	for k := range idx {
-		if !isStableVersion(k) {
+	for k, ri := range idx {
+		v := k
+		if ri.Version != "" {
+			v = ri.Version
+		}
+		if !isStableVersion(v) {
 			continue
 		}
-		if filter == "" || strings.HasPrefix(k, filter+".") || k == filter {
-			versions = append(versions, k)
-		}
+		versions = append(versions, v)
 	}
 	sort.Slice(versions, func(i, j int) bool { return semverLess(versions[j], versions[i]) })
-	return versions, nil
+	return dedupe(versions), nil
+}
+
+func fetchLatestForTrack(track string) (string, error) {
+	url := "https://www.php.net/releases/index.php?json&version=" + track
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("php releases endpoint returned %d", resp.StatusCode)
+	}
+	var raw map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return "", err
+	}
+	if v, ok := raw["version"].(string); ok && isStableVersion(v) {
+		return v, nil
+	}
+	for _, val := range raw {
+		if m, ok := val.(map[string]any); ok {
+			if v, ok := m["version"].(string); ok && isStableVersion(v) {
+				return v, nil
+			}
+		}
+	}
+	return "", nil
+}
+
+func dedupe(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func semverLess(a, b string) bool {
@@ -452,6 +585,10 @@ func parseSemver(v string) [3]int {
 
 func downloadPHPArchive(version, dst string) (path string, kind string, err error) {
 	if runtime.GOOS == "windows" {
+		bases := []string{
+			"https://windows.php.net/downloads/releases/",
+			"https://windows.php.net/downloads/releases/archives/",
+		}
 		candidates := []string{
 			fmt.Sprintf("php-%s-nts-Win32-vs17-x64.zip", version),
 			fmt.Sprintf("php-%s-Win32-vs17-x64.zip", version),
@@ -459,20 +596,20 @@ func downloadPHPArchive(version, dst string) (path string, kind string, err erro
 			fmt.Sprintf("php-%s-Win32-vs16-x64.zip", version),
 		}
 		var lastErr error
-		for _, fname := range candidates {
-			url := "https://windows.php.net/downloads/releases/" + fname
-			out := filepath.Join(dst, fname)
-			if err := downloadFile(url, out); err == nil {
-				return out, "zip", nil
-			} else {
-				lastErr = err
+		for _, b := range bases {
+			for _, fname := range candidates {
+				url := b + fname
+				out := filepath.Join(dst, fname)
+				if err := downloadFile(url, out); err == nil {
+					return out, "zip", nil
+				} else {
+					lastErr = err
+				}
 			}
 		}
 		return "", "", fmt.Errorf("windows package download failed for all known variants (nts/ts, vs17/vs16): %w", lastErr)
 	}
 
-	// Linux note: php.net distributions are source tarballs. We keep this download path
-	// for now but return explicit guidance when binary layout is missing after extract.
 	fname := fmt.Sprintf("php-%s.tar.gz", version)
 	url := "https://www.php.net/distributions/" + fname
 	out := filepath.Join(dst, fname)
